@@ -3,6 +3,7 @@ import axios from "axios";
 import Chat from "./components/Chat";
 import Budget from "./components/Budget";
 import Auth from "./components/Auth";
+import SideHustle from "./components/SideHustle";
 import "./App.css";
 
 export default function App() {
@@ -79,6 +80,9 @@ export default function App() {
         <aside className="card budget-box" aria-labelledby="budget-heading">
           <h2 id="budget-heading" className="small" style={{display:'none'}}>Budget Planner</h2>
           <Budget />
+          <div style={{marginTop:12}}>
+            <SideHustle />
+          </div>
           <div className="note">Tip: Use the chatbot to get plain-language finance help. This demo uses mock AI replies.</div>
         </aside>
       </main>

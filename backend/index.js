@@ -13,20 +13,29 @@ const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017';
 const mongoDbName = process.env.MONGODB_DB || 'finmentor_dev';
 const client = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 5000 });
 let searchesCollection;
+let transactionsCollection;
+let esdAlertsCollection;
 
 async function start() {
   try {
     await client.connect();
     const db = client.db(mongoDbName);
     searchesCollection = db.collection('searches');
+    transactionsCollection = db.collection('transactions');
+    esdAlertsCollection = db.collection('esd_alerts');
     const usersCollection = db.collection('users');
-    
+
     // Create indexes for better query performance
     await searchesCollection.createIndex({ userId: 1, timestamp: -1 });
+    await transactionsCollection.createIndex({ userId: 1, timestamp: -1 });
+    await transactionsCollection.createIndex({ category: 1 });
+    await esdAlertsCollection.createIndex({ userId: 1, timestamp: -1 });
     await usersCollection.createIndex({ email: 1 }, { unique: true });
-    
+
     // Make collections globally available
     global.searchesCollection = searchesCollection;
+    global.transactionsCollection = transactionsCollection;
+    global.esdAlertsCollection = esdAlertsCollection;
     global.usersCollection = usersCollection;
     
     console.log(`✅ Connected to MongoDB at ${mongoUri}, DB: ${mongoDbName}`);
@@ -310,6 +319,272 @@ app.get('/api/searches', async (req, res) => {
   } catch (err) {
     console.error('Error fetching searches:', err.message);
     res.status(500).json({ error: 'Failed to fetch searches' });
+  }
+});
+
+// Transactions API: log user transactions (amount, category, merchant, note)
+app.post('/api/transactions', async (req, res) => {
+  try {
+    const { userId, amount, category, merchant, note, timestamp } = req.body;
+    const doc = {
+      userId: userId || null,
+      amount: Number(amount) || 0,
+      category: category || 'unknown',
+      merchant: merchant || null,
+      note: note || null,
+      timestamp: timestamp ? new Date(timestamp) : new Date(),
+    };
+
+    if (!global.transactionsCollection) return res.status(503).json({ error: 'MongoDB not connected' });
+    const result = await global.transactionsCollection.insertOne(doc);
+    console.log('🧾 Transaction logged:', result.insertedId, doc);
+    res.json({ success: true, id: result.insertedId });
+  } catch (err) {
+    console.error('❌ Failed to log transaction:', err.message);
+    res.status(500).json({ error: 'Failed to log transaction' });
+  }
+});
+
+// Emotional-Spending Detector (ESD) analysis endpoint
+// Analyzes recent transactions and chat messages for a user and creates alerts when patterns indicate emotional spending
+app.post('/api/esd/analyze', async (req, res) => {
+  try {
+    const { userId, lookbackDays = 90 } = req.body;
+    if (!userId) return res.status(400).json({ error: 'userId is required' });
+    if (!global.transactionsCollection || !global.searchesCollection || !global.esdAlertsCollection) {
+      return res.status(503).json({ error: 'MongoDB not connected' });
+    }
+
+    const now = new Date();
+    const lookbackDate = new Date(now.getTime() - Number(lookbackDays) * 24 * 60 * 60 * 1000);
+
+    // Fetch transactions in the lookback window
+    const txCursor = global.transactionsCollection.find({ userId, timestamp: { $gte: lookbackDate } });
+    const transactions = await txCursor.toArray();
+
+    // Fetch chat/search logs in the same window
+    const chats = await global.searchesCollection.find({ userId, timestamp: { $gte: lookbackDate } }).toArray();
+
+    // Simple sentiment detection on chat messages (keyword-based)
+    const negativeKeywords = ['stressed', 'stress', 'sad', 'depressed', 'bored', 'angry', 'upset', 'anxious', 'lonely', 'tired', 'frustrat', 'bad day', 'panic', 'overwhelmed', 'stressing'];
+    const positiveKeywords = ['happy', 'excited', 'great', 'good', 'relieved'];
+
+    const chatSentiments = chats.map(c => {
+      const text = (c.query || '').toLowerCase();
+      let score = 0;
+      negativeKeywords.forEach(k => { if (text.includes(k)) score -= 1; });
+      positiveKeywords.forEach(k => { if (text.includes(k)) score += 1; });
+      return { ...c, sentimentScore: score };
+    });
+
+    // Identify negative-chat timestamps
+    const negativeChats = chatSentiments.filter(c => c.sentimentScore < 0);
+
+    // Aggregate baseline spend per category (average daily spend)
+    const totals = {};
+    transactions.forEach(t => {
+      const cat = t.category || 'unknown';
+      totals[cat] = totals[cat] || { amount: 0, count: 0 };
+      totals[cat].amount += Number(t.amount || 0);
+      totals[cat].count += 1;
+    });
+
+    const days = Math.max(1, Math.ceil((now - lookbackDate) / (1000 * 60 * 60 * 24)));
+    const baseline = {};
+    Object.keys(totals).forEach(cat => {
+      baseline[cat] = { avgDaily: totals[cat].amount / days, total: totals[cat].amount, count: totals[cat].count };
+    });
+
+    // For each negative chat, check spend in 7 days after the chat and compare to baseline
+    const alerts = [];
+    for (const chat of negativeChats) {
+      const windowStart = new Date(chat.timestamp);
+      const windowEnd = new Date(windowStart.getTime() + 7 * 24 * 60 * 60 * 1000);
+      const windowTx = transactions.filter(t => t.timestamp >= windowStart && t.timestamp <= windowEnd);
+
+      // Aggregate spend by category in window
+      const windowTotals = {};
+      windowTx.forEach(t => {
+        const cat = t.category || 'unknown';
+        windowTotals[cat] = windowTotals[cat] || 0;
+        windowTotals[cat] += Number(t.amount || 0);
+      });
+
+      // Compare with baseline and generate alerts when spike detected
+      Object.keys(windowTotals).forEach(cat => {
+        const windowAmount = windowTotals[cat];
+        const baselineDaily = (baseline[cat] && baseline[cat].avgDaily) || 0.01; // avoid div0
+        const expectedWindowAmount = baselineDaily * 7;
+        const ratio = windowAmount / Math.max(expectedWindowAmount, 0.01);
+        if (ratio >= 1.5 && windowAmount >= 500) { // threshold: 50% increase & at least ₹500
+          const alert = {
+            userId,
+            category: cat,
+            chatSnippet: chat.query,
+            chatTimestamp: chat.timestamp,
+            windowAmount,
+            expectedWindowAmount: Math.round(expectedWindowAmount),
+            ratio: Number(ratio.toFixed(2)),
+            createdAt: new Date(),
+            message: `Detected potential emotional spending: you spent ₹${Math.round(windowAmount).toLocaleString()} on ${cat} within 7 days after saying \"${(chat.query||'') .slice(0,120)}\".`
+          };
+          alerts.push(alert);
+        }
+      });
+    }
+
+    // Save alerts to DB (if any)
+    if (alerts.length > 0) {
+      const inserts = alerts.map(a => ({ ...a }));
+      await global.esdAlertsCollection.insertMany(inserts);
+      console.log(`⚠️ ESD: Created ${alerts.length} alert(s) for user ${userId}`);
+    }
+
+    res.json({ success: true, alerts, baseline });
+  } catch (err) {
+    console.error('❌ ESD analysis failed:', err.message);
+    res.status(500).json({ error: 'ESD analysis failed' });
+  }
+});
+
+// Retrieve ESD alerts for a user
+app.get('/api/esd/alerts', async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: 'userId is required' });
+    if (!global.esdAlertsCollection) return res.status(503).json({ error: 'MongoDB not connected' });
+
+    const results = await global.esdAlertsCollection.find({ userId }).sort({ createdAt: -1 }).limit(100).toArray();
+    res.json(results);
+  } catch (err) {
+    console.error('Error fetching ESD alerts:', err.message);
+    res.status(500).json({ error: 'Failed to fetch ESD alerts' });
+  }
+});
+
+// --- Side-Hustle Generator Endpoints ---
+// Suggest side-hustles based on skills and availability
+app.post('/api/sidehustle/suggest', async (req, res) => {
+  try {
+    const { skills = '', hoursPerWeek = 0, preferences = [] } = req.body;
+    const skillText = (Array.isArray(skills) ? skills.join(' ') : skills).toLowerCase();
+    const hours = Number(hoursPerWeek) || 0;
+
+    // Simple rule-based mapping from skills to hustles
+    const ideas = [];
+    const pushIdea = (title, categories, estMonthly, description, steps, tags=[]) => {
+      ideas.push({ title, categories, estMonthly, description, steps, tags });
+    };
+
+    // matchers
+    const has = (kw) => skillText.includes(kw);
+
+    if (has('video') || has('editing') || has('premiere') || has('final cut')) {
+      pushIdea('Video Editor (Freelance)', ['video','media'], Math.round(0.8 * hours * 500), 'Edit short videos for creators and businesses.', [
+        'Create a portfolio of 3 sample edits',
+        'Offer 30-min free edit to first clients',
+        'List service on Fiverr/Upwork/Instagram'
+      ], ['portfolio','remote']);
+    }
+
+    if (has('teach') || has('tutor') || has('math') || has('english') || has('physics') || has('chemistry')) {
+      pushIdea('Online Tutor', ['education'], Math.round(0.9 * hours * 600), 'Offer subject tutoring to students online.', [
+        'Define syllabus & rates (per hour)',
+        'Create 2 sample lesson plans',
+        'Advertise on local FB groups, UrbanPro, and WhatsApp'
+      ], ['online','flexible']);
+    }
+
+    if (has('write') || has('content') || has('blog') || has('copy')) {
+      pushIdea('Freelance Writer / Content Creator', ['writing'], Math.round(0.7 * hours * 450), 'Write blog posts, product descriptions, or social captions.', [
+        'Build 3 writing samples',
+        'Pitch to 5 blogs or SMEs weekly',
+        'Create Fiverr/Upwork gigs'
+      ], ['remote','scalable']);
+    }
+
+    if (has('design') || has('photoshop') || has('illustrator') || has('figma')) {
+      pushIdea('Graphic Designer', ['design'], Math.round(0.75 * hours * 550), 'Design social media creatives, banners, logos.', [
+        'Build 5 sample social posts',
+        'Showcase on Dribbble/Behance',
+        'Offer packages for recurring clients'
+      ], ['remote','portfolio']);
+    }
+
+    if (has('phone') || has('sales') || has('resell') || has('shopping') || has('flip')) {
+      pushIdea('Reselling / Flipping', ['resell'], Math.round(0.6 * hours * 400), 'Buy low, sell on OLX/Meesho/Instagram for profit.', [
+        'Find 5 reliable suppliers',
+        'List items with good photos & descriptions',
+        'Reinvest profits to scale'
+      ], ['local','hands-on']);
+    }
+
+    if (has('excel') || has('data') || has('analytics')) {
+      pushIdea('Data Entry / Spreadsheet Specialist', ['data'], Math.round(0.9 * hours * 300), 'Clean data, create reports, and automate tasks.', [
+        'Prepare sample spreadsheets',
+        'List hourly gigs on freelancing sites',
+        'Automate repetitive tasks with templates'
+      ], ['remote','reliable']);
+    }
+
+    if (ideas.length === 0) {
+      // Fallback ideas based on availability only
+      if (hours >= 15) {
+        pushIdea('Part-time Delivery / Local Gig', ['local'], 8000, 'Delivery, local services (high time commitment).', [
+          'Check local delivery platforms',
+          'Keep flexible schedule',
+          'Track earnings and fuel costs'
+        ], ['local']);
+      } else if (hours > 0) {
+        pushIdea('Micro-gigs & Tasks', ['micro'], Math.round(hours * 300), 'Microtasks: content moderation, short transcriptions, surveys.', [
+          'Sign up on microtask platforms',
+          'Complete 10 tasks/day to build reputation'
+        ], ['quick','remote']);
+      } else {
+        pushIdea('Explore Skills', ['explore'], 0, 'Add a few skills (video, writing, teaching) and re-run the generator.', [
+          'Pick one skill and build 3 samples',
+          'Set 5 hours/week to practice'
+        ], ['learn']);
+      }
+    }
+
+    // Add estimated effort/advice based on hours and preferences
+    const enhanced = ideas.map(i => ({
+      ...i,
+      suitability: Math.min(100, Math.round((hours / 20) * 100)),
+      note: `Estimated monthly (based on ${hours} hrs/week): ~₹${i.estMonthly}`
+    }));
+
+    res.json({ success: true, suggestions: enhanced });
+  } catch (err) {
+    console.error('❌ Side-hustle suggest error:', err.message);
+    res.status(500).json({ error: 'Failed to suggest side-hustles' });
+  }
+});
+
+// Generate a starter guide, gig description, and resume snippet for a chosen idea
+app.post('/api/sidehustle/generate', async (req, res) => {
+  try {
+    const { title, skills = '', hoursPerWeek = 0, preferences = [] } = req.body;
+    if (!title) return res.status(400).json({ error: 'title is required' });
+
+    // Simple templates
+    const gig = `Title: ${title}\n\nAbout: I provide ${title.toLowerCase()} services with a focus on quality and timely delivery. I have skills in ${skills || 'relevant tools'} and can work ${hoursPerWeek} hours/week.\n\nPackages:\n- Basic: 1 deliverable, 48h turnaround\n- Standard: 2 deliverables, 72h turnaround\n- Premium: 4 deliverables, priority support\n\nWhy hire me: fast turnaround, attention to detail, open communication.`;
+
+    const steps = [
+      'Decide your niche and 2 core services',
+      'Create 3 portfolio samples (real or mock)',
+      'Price your packages and set delivery timelines',
+      'List on one marketplace (Fiverr/Upwork) and 2 social channels',
+      'Pitch to 5 potential clients in first week'
+    ];
+
+    const resumeSnippet = `• ${title} — freelance (self-employed) — ${new Date().getFullYear()}\n  • Core skills: ${skills || 'skillset'}\n  • Availability: ${hoursPerWeek} hrs/week\n  • Key achievements: delivered sample projects, positive client feedback`;
+
+    res.json({ success: true, gigDescription: gig, steps, resumeSnippet });
+  } catch (err) {
+    console.error('❌ Side-hustle generate error:', err.message);
+    res.status(500).json({ error: 'Failed to generate content' });
   }
 });
 

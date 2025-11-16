@@ -62,6 +62,61 @@ VITE_API_URL=http://localhost:4000
 - Open the `finmentor_dev` database and inspect `users` and `searches` collections.
 - See `MONGODB_GUIDE.md` for full details and example queries.
 
+## Emotional-Spending Detector (ESD)
+
+FinMentor includes a prototype Emotional-Spending Detector that looks for patterns where users tend to spend more after expressing negative emotions in chat (e.g., "I'm stressed").
+
+How it works (prototype):
+- You log transactions via the backend API (`/api/transactions`).
+- The server analyzes recent transactions and chat messages (`searches`) for a user and looks for spending spikes within 7 days after chats that contain negative keywords.
+- When a spike is detected, an alert document is saved in the `esd_alerts` collection and returned by the analysis endpoint.
+
+Endpoints (examples):
+
+Log a transaction:
+```powershell
+curl.exe -X POST "http://localhost:4000/api/transactions" -H "Content-Type: application/json" -d '{ "userId":"user_123", "amount":499, "category":"food", "merchant":"Zomato", "note":"late-night order" }'
+```
+
+Run ESD analysis for a user (server returns alerts if found):
+```powershell
+curl.exe -X POST "http://localhost:4000/api/esd/analyze" -H "Content-Type: application/json" -d '{ "userId":"user_123", "lookbackDays":90 }'
+```
+
+Fetch alerts for a user:
+```powershell
+curl.exe "http://localhost:4000/api/esd/alerts?userId=user_123"
+```
+
+## Personalized Side-Hustle Generator
+
+FinMentor now includes a Side-Hustle Generator prototype that recommends gig ideas based on a user's skills and available hours, and can generate starter guides and gig/resume text.
+
+How it works (prototype):
+- User provides skills and weekly hours.
+- The server returns a set of suggested side-hustles with short descriptions, estimated monthly income, and starter steps.
+- The `generate` endpoint returns a gig description, step-by-step starter plan, and a resume snippet you can copy-paste.
+
+Endpoints (examples):
+
+Suggest ideas:
+```powershell
+curl.exe -X POST "http://localhost:4000/api/sidehustle/suggest" -H "Content-Type: application/json" -d '{ "skills":"video editing, premiere", "hoursPerWeek":8 }'
+```
+
+Generate a guide & gig text:
+```powershell
+curl.exe -X POST "http://localhost:4000/api/sidehustle/generate" -H "Content-Type: application/json" -d '{ "title":"Video Editor (Freelance)", "skills":"premiere, color grading", "hoursPerWeek":8 }'
+```
+
+Frontend:
+- A responsive `SideHustle` component is added under the Budget panel. Enter skills and hours to get suggestions and generate starter guides.
+
+Notes & next steps:
+- This is a rule-based prototype. We can later replace mappings with an ML model or richer prompts to an LLM to produce more personalized outputs.
+- If you want a separate full-page UI, I can move `SideHustle` to its own route and add richer forms and CV export options.
+
+
 ## Files of interest
 
 - `backend/index.js` — Express server, chat logic, MongoDB integration
