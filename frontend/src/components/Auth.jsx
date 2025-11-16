@@ -25,9 +25,16 @@ export default function Auth({ onLogin }) {
       return;
     }
 
+    if (!password) {
+      setError("Please enter your password.");
+      setLoading(false);
+      return;
+    }
+
     try {
       const res = await axios.post(`${apiBase}/api/auth/login`, {
         email: email.trim(),
+        password,
         name: name || "User",
       });
 
@@ -55,6 +62,18 @@ export default function Auth({ onLogin }) {
       return;
     }
 
+    if (!password) {
+      setError('Please enter a password.');
+      setLoading(false);
+      return;
+    }
+
+    if (password !== confirm) {
+      setError('Passwords do not match.');
+      setLoading(false);
+      return;
+    }
+
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
       setError("Please enter a valid email address.");
       setLoading(false);
@@ -65,6 +84,7 @@ export default function Auth({ onLogin }) {
       const res = await axios.post(`${apiBase}/api/auth/register`, {
         email: email.trim(),
         name: name.trim(),
+        password,
       });
 
       if (res.data.success) {
@@ -96,6 +116,13 @@ export default function Auth({ onLogin }) {
             type="email"
             value={email} 
             onChange={(e) => setEmail(e.target.value)}
+            disabled={loading}
+          />
+          <input
+            placeholder="Password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
             disabled={loading}
           />
           <input 
@@ -133,6 +160,20 @@ export default function Auth({ onLogin }) {
             type="email"
             value={email} 
             onChange={(e) => setEmail(e.target.value)}
+            disabled={loading}
+          />
+          <input
+            placeholder="Password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={loading}
+          />
+          <input
+            placeholder="Confirm password"
+            type="password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
             disabled={loading}
           />
           {error && <div className="error" role="alert">{error}</div>}

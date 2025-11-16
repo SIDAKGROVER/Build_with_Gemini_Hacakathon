@@ -2,6 +2,7 @@
 const express = require('express');
 const cors = require('cors');
 const { MongoClient } = require('mongodb');
+const bcrypt = require('bcryptjs');
 
 const app = express();
 
@@ -590,10 +591,10 @@ app.post('/api/sidehustle/generate', async (req, res) => {
 
 // Authentication API: Register/Login with persistence to MongoDB
 app.post('/api/auth/register', async (req, res) => {
-  const { email, name } = req.body;
-  
-  if (!email || !name) {
-    return res.status(400).json({ error: 'Email and name are required' });
+  const { email, name, password } = req.body;
+
+  if (!email || !name || !password) {
+    return res.status(400).json({ error: 'Email, name and password are required' });
   }
 
   try {
@@ -606,17 +607,21 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(409).json({ error: 'User already exists' });
     }
 
+    // Hash password (use sync API to avoid callback/promise issues)
+    const hashed = bcrypt.hashSync(password, 10);
+
     // Create new user
     const user = {
       email,
       name,
+      hashedPassword: hashed,
       createdAt: new Date(),
       lastLogin: new Date(),
     };
 
     const result = await usersCollection.insertOne(user);
     const userData = { _id: result.insertedId.toString(), email, name };
-    
+
     console.log('✅ New user registered:', email);
     res.json({ success: true, user: userData });
   } catch (err) {
@@ -626,28 +631,40 @@ app.post('/api/auth/register', async (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
-  const { email, name } = req.body;
-  
-  if (!email) {
-    return res.status(400).json({ error: 'Email is required' });
+  const { email, password, name } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
   }
 
   try {
     const usersCollection = global.usersCollection;
     if (!usersCollection) return res.status(503).json({ error: 'MongoDB not connected' });
 
-    // Find or create user
-    const user = await usersCollection.findOneAndUpdate(
+    // Find user
+    const userDoc = await usersCollection.findOne({ email });
+    if (!userDoc) {
+      return res.status(404).json({ error: 'User not found — please register' });
+    }
+
+    if (!userDoc.hashedPassword) {
+      return res.status(400).json({ error: 'Account exists but no password set. Please register again.' });
+    }
+
+    const match = bcrypt.compareSync(password, userDoc.hashedPassword);
+    if (!match) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Update lastLogin and optionally name
+    const updated = await usersCollection.findOneAndUpdate(
       { email },
-      {
-        $set: { lastLogin: new Date(), name: name || 'User' },
-        $setOnInsert: { createdAt: new Date() },
-      },
-      { upsert: true, returnDocument: 'after' }
+      { $set: { lastLogin: new Date(), name: name || userDoc.name || 'User' } },
+      { returnDocument: 'after' }
     );
 
-    const userData = { _id: user.value._id.toString(), email: user.value.email, name: user.value.name };
-    
+    const userData = { _id: updated.value._id.toString(), email: updated.value.email, name: updated.value.name };
+
     console.log('✅ User logged in:', email);
     res.json({ success: true, user: userData });
   } catch (err) {
