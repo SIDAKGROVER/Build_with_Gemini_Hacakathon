@@ -2,6 +2,10 @@
 
 FinMentor is a lightweight demo application that provides plain-language financial coaching via a chatbot and a simple budget planner. This repository contains a frontend (Vite + React) and a backend (Node + Express) with optional MongoDB persistence for chat searches and user accounts.
 
+YouTube video link:--
+https://www.youtube.com/watch?v=709LdYmRNnI
+
+
 ## Features
 
 - Chatbot that gives savings and budgeting advice (mock AI responses)
