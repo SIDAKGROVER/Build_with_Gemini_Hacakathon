@@ -1,0 +1,13 @@
+:root{--stub:1}
+
+/* Minimal reset and system font - main visual styles are in App.css */
+html,body,#root{height:100%;}
+body{margin:0; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;}
+
+/* sensible defaults for interactive elements */
+button{font-family:inherit; cursor:pointer}
+input,button,textarea{outline:none}
+
+/* small helpers used by components */
+.error{color:#b91c1c; margin-top:8px; font-size:13px}
+
